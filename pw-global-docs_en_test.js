@@ -2192,12 +2192,12 @@ function updateVerticalArticleLists() {
 }
 
 	/* =========================================
-	   7. LEFT DOCUMENTATION TREE FILTER V2
+	   7. LEFT DOCUMENTATION TREE FILTER V3 — STABLE
 	   PL + EN / fuzzy search / no API key
 	   ========================================= */
 
 	function initTreeFilterStyles() {
-		addStyle("pw-tree-filter-v2-styles", `
+		addStyle("pw-tree-filter-v3-styles", `
 			#ui-side-nav.pw-tree-filter-ready > .ui-toc-tree {
 				height: calc(100% - 82px) !important;
 				min-height: 0;
@@ -2270,6 +2270,29 @@ function updateVerticalArticleLists() {
 			}
 			html.pw-dark-mode #ui-side-nav .pw-tree-filter-match:not(.active) { background: #3C3029 !important; }
 			html.pw-dark-mode #ui-side-nav .pw-tree-filter-match:not(.active) .TreeListcontent > a span { color: #FDBA74 !important; }
+            #ui-side-nav.pw-tree-filter-searching > .ui-toc-tree { visibility: hidden !important; pointer-events: none !important; }
+            #ui-side-nav > .pw-tree-filter-results {
+                position: absolute; top: 82px; bottom: 0; left: 0; right: 0;
+                overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
+                overflow-anchor: none; background: #fff; z-index: 2; padding: 6px 8px;
+                box-sizing: border-box; font: 13px/1.45 Tahoma, Geneva, sans-serif;
+            }
+            #ui-side-nav > .pw-tree-filter-results[hidden] { display: none !important; }
+            #ui-side-nav .pw-tree-result {
+                display: block !important; width: 100%; text-align: left; padding: 9px 10px;
+                margin: 2px 0; border: 0; border-radius: 7px; background: transparent;
+                color: #334155 !important; text-decoration: none !important;
+                font: inherit; cursor: pointer; overflow-wrap: anywhere; box-sizing: border-box;
+            }
+            #ui-side-nav .pw-tree-result:hover, #ui-side-nav .pw-tree-result:focus-visible {
+                background: #FFF7ED !important; color: #92400E !important; outline: 2px solid #D97706;
+            }
+            #ui-side-nav .pw-tree-result small { display: block; font-size: 10px; color: #64748B; }
+            html.pw-dark-mode #ui-side-nav > .pw-tree-filter-results { background: #202631; }
+            html.pw-dark-mode #ui-side-nav .pw-tree-result { color: #E8EDF5 !important; }
+            html.pw-dark-mode #ui-side-nav .pw-tree-result small { color: #CBD5E1; }
+            html.pw-dark-mode #ui-side-nav .pw-tree-result:hover { background: #3C3029 !important; color: #FDBA74 !important; }
+
 		`);
 	}
 
@@ -2320,136 +2343,165 @@ function updateVerticalArticleLists() {
 	let treeFilterValue = "";
 	let treeFilterLanguage = null;
 	let treeFilterTimer = 0;
-	const TREE_SCAN_LIMIT = 250;
-	const TREE_SCAN_DELAY = 300;
-	const TREE_SCAN_TIMEOUT = 3500;
-	const treePause = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-	// Platforma renderuje drzewo jako płaską listę wierszy.
-	// Nie odtwarzamy drzewa ani nie pobieramy danych z prywatnego API.
-	// Klikamy wyłącznie natywną ikonę zamkniętego folderu.
-	function treeScanValid(state, job) {
-		return treeFilterState === state && state.tree.isConnected &&
-			state.scan === job && Boolean(treeSearchNormalize(treeFilterValue)) &&
-			job.path === location.pathname;
-	}
-
-	function stopTreeScan(state) {
-		if (state) state.scan = null;
-	}
-
-	function startTreeScan(state) {
-		if (!state || !treeSearchNormalize(treeFilterValue)) return;
-		if (state.scan && state.scan.path === location.pathname) return;
-		const job = { path: location.pathname, tried: new Set(), failed: 0,
-			opened: 0, running: true, limited: false };
-		state.scan = job;
-		(async function () {
-			try {
-				while (treeScanValid(state, job)) {
-					const folders = Array.from(state.tree.querySelectorAll(
-						'.o2xp-tree-view .TreeListcontent.folder-ct[id]'));
-					const folder = folders.find(node => !job.tried.has(node.id) &&
-						node.querySelector('.folder_icons_toc1'));
-					if (!folder) {
-						// Daj platformie czas na dociągnięcie ostatnich dzieci.
-						await treePause(600);
-						if (!treeScanValid(state, job)) return;
-						const pending = Array.from(state.tree.querySelectorAll(
-							'.o2xp-tree-view .TreeListcontent.folder-ct[id]')).some(node =>
-							!job.tried.has(node.id) && node.querySelector('.folder_icons_toc1'));
-						if (pending) continue;
-						break;
-					}
-					if (job.tried.size >= TREE_SCAN_LIMIT) { job.limited = true; break; }
-					const id = folder.id;
-					job.tried.add(id);
-					const icon = folder.querySelector('.folder_icons_toc1');
-					if (!icon || !icon.isConnected) continue;
-					icon.click();
-					const deadline = Date.now() + TREE_SCAN_TIMEOUT;
-					let expanded = false;
-					while (treeScanValid(state, job) && Date.now() < deadline) {
-						await treePause(100);
-						const current = document.getElementById(id);
-						if (current && state.tree.contains(current) &&
-							current.querySelector('.folder_icons_toc1_expanded')) {
-							expanded = true;
-							break;
-						}
-					}
-					if (!treeScanValid(state, job)) return;
-					if (expanded) job.opened++; else job.failed++;
-					renderTreeFilter();
-					await treePause(TREE_SCAN_DELAY);
-				}
-			} catch (error) {
-				job.failed++;
-				console.warn('[PlusWorkflow] Tree scan:', error);
-			} finally {
-				job.running = false;
-				if (treeScanValid(state, job)) renderTreeFilter();
-			}
-		})();
-	}
-
-
-	function renderTreeFilter() {
-		const state = treeFilterState;
-		if (!state || !state.tree.isConnected) return;
-		const query = treeSearchNormalize(treeFilterValue);
-		let count = 0;
-		const rows = state.tree.querySelectorAll(".o2xp-tree-view .list-view.x-tree-node");
-		rows.forEach(row => {
-			const content = row.querySelector(":scope > .TreeListcontent");
-			const anchor = content && content.querySelector(":scope > a");
-			if (!anchor) return;
-			const title = treeSearchNormalize(anchor.textContent);
-			const folder = content.classList.contains("folder-ct");
-			const match = Boolean(query && treeSearchMatches(title, query));
-			if (match) count++;
-			// Foldery zachowujemy, również gdy nie pasują: ich dzieci mogą być ładowane dopiero po rozwinięciu.
-			row.classList.toggle("pw-tree-filter-hidden", Boolean(query && !match && !folder));
-			row.classList.toggle("pw-tree-filter-match", match);
-		});
-		const job = state.scan;
-		const scanning = query && job && job.running;
-		const incomplete = query && job && !job.running && (job.failed || job.limited);
-		const message = query ? (count || scanning ? tr("Wyniki: ", "Matches: ") + count : tr("Brak dopasowań", "No matches")) : tr("Filtr nazw w menu", "Filter navigation titles");
-		const hint = scanning ? tr("Przeszukuję foldery… ", "Scanning folders… ") + job.opened :
-			incomplete ? tr("Część folderów nie została wczytana", "Some folders could not be loaded") :
-			query && job ? tr("Przeszukano dostępne foldery", "Available folders scanned") :
-			tr("Wyszukuje także w zwiniętych folderach", "Searches collapsed folders too");
-		if (state.hint.textContent !== hint) state.hint.textContent = hint;
-		state.hint.title = hint;
-		if (state.status.textContent !== message) state.status.textContent = message;
-		state.clear.hidden = !treeFilterValue;
-	}
-
-	function scheduleTreeFilter() {
-		clearTimeout(treeFilterTimer);
-		treeFilterTimer = setTimeout(() => {
-			const state = treeFilterState;
-			if (state && treeSearchNormalize(treeFilterValue)) startTreeScan(state);
-			else stopTreeScan(state);
-			renderTreeFilter();
-		}, 180);
-	}
+    // Sitemap is fetched once on demand. Never click folders automatically.
+    let treeSitemapPromise = null;
+    let treeSitemapEntries = [];
+    let treeSitemapStatus = "idle";
+    function treeSafeURL(value, base = location.origin) {
+        try {
+            const url = new URL(value, base);
+            if (url.origin !== location.origin || !/^https?:$/.test(url.protocol)) return null;
+            url.hash = ""; url.search = "";
+            return url;
+        } catch (_) { return null; }
+    }
+    async function treeReadSitemap(url, seen, entries) {
+        if (seen.has(url.href)) return;
+        if (seen.size >= 30) throw new Error("Sitemap limit");
+        seen.add(url.href);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        let text;
+        try {
+            const response = await fetch(url.href, {credentials: "same-origin", signal: controller.signal});
+            if (!response.ok) throw new Error("Sitemap HTTP " + response.status);
+            text = await response.text();
+        } finally { clearTimeout(timeout); }
+        const xml = new DOMParser().parseFromString(text, "application/xml");
+        const root = xml.documentElement;
+        if (xml.querySelector("parsererror") || !["urlset", "sitemapindex"].includes(root.localName)) throw new Error("Invalid sitemap");
+        for (const node of Array.from(root.children)) {
+            const loc = Array.from(node.children).find(child => child.localName === "loc");
+            const target = loc && treeSafeURL(loc.textContent.trim(), url.href);
+            if (!target) continue;
+            if (root.localName === "sitemapindex") { await treeReadSitemap(target, seen, entries); continue; }
+            if (node.localName !== "url") continue;
+            const title = Array.from(node.children).find(child => child.localName === "title");
+            let slug = target.pathname.split("/").filter(Boolean).pop() || "Home";
+            try { slug = decodeURIComponent(slug); } catch (_) {}
+            entries.set(target.href, {url: target.href, title: title?.textContent.trim() || slug.replace(/[-_]+/g, " "), slug: !title?.textContent.trim(), english: isEnglishPath(target.pathname)});
+            for (const alternate of Array.from(node.children).filter(child => child.localName === "link")) {
+                const href = alternate.getAttribute("href");
+                const alt = href && treeSafeURL(href, target.href);
+                if (!alt || alternate.getAttribute("rel") !== "alternate") continue;
+                let name = alt.pathname.split("/").filter(Boolean).pop() || "Home";
+                try { name = decodeURIComponent(name); } catch (_) {}
+                if (!entries.has(alt.href)) entries.set(alt.href, {url: alt.href, title: name.replace(/[-_]+/g, " "), slug: true, english: isEnglishPath(alt.pathname)});
+            }
+        }
+    }
+    function startTreeScan(state) {
+        if (!state || !treeSearchNormalize(treeFilterValue) || treeSitemapPromise) return;
+        treeSitemapStatus = "loading";
+        treeSitemapPromise = (async () => {
+            for (const path of ["/sitemap.xml/", "/sitemap.xml"]) {
+                const entries = new Map();
+                try {
+                    await treeReadSitemap(new URL(path, location.origin), new Set(), entries);
+                    if (!entries.size) throw new Error("Empty sitemap");
+                    treeSitemapEntries = Array.from(entries.values());
+                    treeSitemapStatus = "ready"; return;
+                } catch (_) { /* Try the other documented URL. */ }
+            }
+            treeSitemapStatus = "error";
+        })().finally(() => { if (treeFilterState && treeSearchNormalize(treeFilterValue)) renderTreeFilter(); });
+    }
+    
+    function renderTreeFilter() {
+        const state = treeFilterState;
+        if (!state || !state.tree.isConnected) return;
+        const query = treeSearchNormalize(treeFilterValue);
+        state.clear.hidden = !treeFilterValue;
+        state.results.hidden = !query;
+        state.nav.classList.toggle("pw-tree-filter-searching", Boolean(query));
+        if (!query) {
+            state.signature = "";
+            state.lastQuery = "";
+            if (state.results.childNodes.length) state.results.replaceChildren();
+            const status = tr("Filtr nazw w menu", "Filter navigation titles");
+            const hint = tr("Menu i mapa witryny", "Menu and sitemap");
+            if (state.status.textContent !== status) state.status.textContent = status;
+            if (state.hint.textContent !== hint) state.hint.textContent = hint;
+            return;
+        }
+        const candidates = new Map();
+        for (const row of state.tree.querySelectorAll(".o2xp-tree-view .list-view.x-tree-node")) {
+            const content = row.querySelector(":scope > .TreeListcontent");
+            const anchor = content && content.querySelector(":scope > a");
+            const title = anchor?.textContent.trim();
+            if (!title) continue;
+            const raw = anchor.getAttribute("href");
+            const url = raw && raw !== "#" && !raw.startsWith("#") ? treeSafeURL(raw) : null;
+            const key = url?.href || "node:" + (content.id || title);
+            candidates.set(key, {title, key, node: anchor, nodeId: content.id, folder: content.classList.contains("folder-ct")});
+        }
+        for (const entry of treeSitemapEntries) {
+            if (entry.english !== isEN() || candidates.has(entry.url)) continue;
+            candidates.set(entry.url, {...entry, key: entry.url});
+        }
+        const matches = Array.from(candidates.values()).filter(item => treeSearchMatches(treeSearchNormalize(item.title), query));
+        const score = item => { const t = treeSearchNormalize(item.title); return t === query ? 0 : t.startsWith(query) ? 1 : t.includes(query) ? 2 : 3; };
+        matches.sort((a,b) => score(a)-score(b) || Number(!a.node)-Number(!b.node) || a.title.localeCompare(b.title, isEN()?"en":"pl"));
+        const shown = matches.slice(0, 150);
+        const signature = JSON.stringify([query, shown.map(i => [i.key,i.title,i.folder])]);
+        if (state.signature !== signature) {
+            const previousScroll = state.lastQuery === query ? state.results.scrollTop : 0;
+            state.lastQuery = query;
+            state.signature = signature;
+            const fragment = document.createDocumentFragment();
+            for (const item of shown) {
+                const result = el(item.node ? "button" : "a", "pw-tree-result");
+                if (item.node) {
+                    result.type = "button";
+                    result.addEventListener("click", () => {
+                        const current = Array.from(state.tree.querySelectorAll(".TreeListcontent > a")).find(a => a === item.node || (a.parentElement.id && a.parentElement.id === item.nodeId));
+                        state.input.value = treeFilterValue = "";
+                        renderTreeFilter();
+                        if (current) {
+                            const icon = item.folder && current.parentElement.querySelector(".folder_icons_toc1");
+                            (icon || current).click();
+                        }
+                    });
+                } else result.href = item.url;
+                result.append(el("span", "", (item.folder ? "›  " : "") + item.title));
+                if (!item.node) result.append(el("small", "", item.slug ? tr("Nazwa z adresu URL", "Name from URL") : tr("Mapa witryny", "Sitemap")));
+                fragment.append(result);
+            }
+            state.results.replaceChildren(fragment);
+            state.results.scrollTop = previousScroll;
+        }
+        const message = tr("Wyniki: ", "Matches: ") + matches.length + (matches.length > 150 ? " (150)" : "");
+        const hint = treeSitemapStatus === "loading" ? tr("Pobieram mapę witryny…", "Loading sitemap…") :
+            treeSitemapStatus === "error" ? tr("Brak mapy — tylko załadowane menu", "Sitemap unavailable — loaded menu only") :
+            treeSitemapStatus === "ready" && treeSitemapEntries.some(i=>i.english===isEN()) ? tr("Menu i adresy z mapy witryny", "Menu and sitemap URLs") : tr("Tylko załadowane menu w tym języku", "Loaded menu only in this language");
+        if (state.status.textContent !== message) state.status.textContent = message;
+        if (state.hint.textContent !== hint) state.hint.textContent = hint;
+        state.hint.title = hint;
+    }
+    function scheduleTreeFilter() {
+        clearTimeout(treeFilterTimer);
+        treeFilterTimer = setTimeout(() => {
+            if (treeFilterState && treeSearchNormalize(treeFilterValue)) startTreeScan(treeFilterState);
+            renderTreeFilter();
+        }, 220);
+    }
 
 	function updateTreeFilter() {
 		const nav = document.getElementById("ui-side-nav");
 		const tree = nav && nav.querySelector(":scope > .ui-toc-tree");
 		const language = isEN() ? "en" : "pl";
+        if (location.pathname !== lastPath) treeFilterValue = "";
 		if (treeFilterLanguage !== language) {
 			treeFilterValue = "";
 			treeFilterLanguage = language;
 		}
 		if (treeFilterState && (treeFilterState.tree !== tree || !treeFilterState.panel.isConnected || treeFilterState.panel.parentElement !== nav)) {
 			const old = treeFilterState;
-			stopTreeScan(old);
+			
 			old.observer.disconnect();
 			old.tree.querySelectorAll(".pw-tree-filter-hidden, .pw-tree-filter-match").forEach(row => row.classList.remove("pw-tree-filter-hidden", "pw-tree-filter-match"));
-			old.nav.classList.remove("pw-tree-filter-ready");
+			old.nav.classList.remove("pw-tree-filter-ready", "pw-tree-filter-searching");
+			old.results.remove();
 			old.panel.remove();
 			treeFilterState = null;
 		}
@@ -2481,18 +2533,20 @@ function updateVerticalArticleLists() {
 			field.append(icon, input, clear);
 			panel.append(field, status, hint);
 			nav.insertBefore(panel, tree);
+            const results = el("div", "pw-tree-filter-results");
+            results.hidden = true;
+            nav.appendChild(results);
 			nav.classList.add("pw-tree-filter-ready");
 			function reset() {
 				clearTimeout(treeFilterTimer);
 				input.value = treeFilterValue = "";
-				stopTreeScan(treeFilterState);
+				
 				renderTreeFilter();
-				input.focus();
+				input.focus({preventScroll: true});
 			}
 			input.addEventListener("input", () => {
 				treeFilterValue = input.value;
 				clear.hidden = !treeFilterValue;
-				if (!treeSearchNormalize(treeFilterValue)) stopTreeScan(treeFilterState);
 				scheduleTreeFilter();
 			});
 			input.addEventListener("keydown", event => {
@@ -2502,7 +2556,7 @@ function updateVerticalArticleLists() {
 			clear.addEventListener("click", reset);
 			const observer = new MutationObserver(scheduleTreeFilter);
 			observer.observe(tree, { childList: true, subtree: true, characterData: true });
-			treeFilterState = { nav, tree, panel, input, clear, status, hint, observer };
+			treeFilterState = { nav, tree, panel, input, clear, status, hint, observer, results, signature: "" };
 		}
 		const s = treeFilterState;
 		if (s.input.value !== treeFilterValue) s.input.value = treeFilterValue;
@@ -2514,9 +2568,9 @@ function updateVerticalArticleLists() {
 		s.panel.setAttribute("aria-label", label);
 		s.clear.setAttribute("aria-label", tr("Wyczyść filtr", "Clear filter"));
 		s.clear.title = tr("Wyczyść filtr", "Clear filter");
-		if (s.scan && s.scan.path !== location.pathname) stopTreeScan(s);
+		
 		if (treeSearchNormalize(treeFilterValue)) startTreeScan(s);
-		else stopTreeScan(s);
+		
 		renderTreeFilter();
 	}
 
