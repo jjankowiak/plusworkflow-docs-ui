@@ -2192,12 +2192,12 @@ function updateVerticalArticleLists() {
 }
 
 	/* =========================================
-	   7. LEFT DOCUMENTATION TREE FILTER V3 — STABLE
+	   7. LEFT DOCUMENTATION TREE FILTER V4 — PASSIVE / NO AUTO NAVIGATION
 	   PL + EN / fuzzy search / no API key
 	   ========================================= */
 
 	function initTreeFilterStyles() {
-		addStyle("pw-tree-filter-v3-styles", `
+		addStyle("pw-tree-filter-v4-styles", `
 			#ui-side-nav.pw-tree-filter-ready > .ui-toc-tree {
 				height: calc(100% - 82px) !important;
 				min-height: 0;
@@ -2287,6 +2287,7 @@ function updateVerticalArticleLists() {
             #ui-side-nav .pw-tree-result:hover, #ui-side-nav .pw-tree-result:focus-visible {
                 background: #FFF7ED !important; color: #92400E !important; outline: 2px solid #D97706;
             }
+            #ui-side-nav .pw-tree-result-label { cursor: default; padding: 9px 10px; }
             #ui-side-nav .pw-tree-result small { display: block; font-size: 10px; color: #64748B; }
             html.pw-dark-mode #ui-side-nav > .pw-tree-filter-results { background: #202631; }
             html.pw-dark-mode #ui-side-nav .pw-tree-result { color: #E8EDF5 !important; }
@@ -2343,6 +2344,37 @@ function updateVerticalArticleLists() {
 	let treeFilterValue = "";
 	let treeFilterLanguage = null;
 	let treeFilterTimer = 0;
+    let treeFilterDebouncing = false;
+    const TREE_MIN_CHARS = 3;
+    function treeActiveQuery() {
+        const query = treeSearchNormalize(treeFilterValue);
+        return query.replace(/\s/g, "").length >= TREE_MIN_CHARS ? query : "";
+    }
+    // Prevent the host app from interpreting filter keystrokes as navigation.
+    function initTreeFilterEventIsolation() {
+        ["keydown", "keypress", "keyup", "input", "change", "compositionend"].forEach(type => {
+            window.addEventListener(type, event => {
+                const state = treeFilterState;
+                if (!state || event.target !== state.input) return;
+                event.stopImmediatePropagation();
+                if (type === "keydown" && !event.isComposing) {
+                    if (event.key === "Enter") event.preventDefault();
+                    if (event.key === "Escape") {
+                        event.preventDefault();
+                        clearTimeout(treeFilterTimer);
+                        treeFilterDebouncing = false;
+                        state.input.value = treeFilterValue = "";
+                        renderTreeFilter();
+                    }
+                }
+                if ((type === "input" && !event.isComposing) || type === "compositionend") {
+                    treeFilterValue = state.input.value;
+                    state.clear.hidden = !treeFilterValue;
+                    scheduleTreeFilter();
+                }
+            }, true);
+        });
+    }
     // Sitemap is fetched once on demand. Never click folders automatically.
     let treeSitemapPromise = null;
     let treeSitemapEntries = [];
@@ -2356,6 +2388,7 @@ function updateVerticalArticleLists() {
         } catch (_) { return null; }
     }
     async function treeReadSitemap(url, seen, entries) {
+        if (!/\.xml(?:\.gz)?\/?$/i.test(url.pathname)) throw new Error("Not a sitemap XML URL");
         if (seen.has(url.href)) return;
         if (seen.size >= 30) throw new Error("Sitemap limit");
         seen.add(url.href);
@@ -2363,7 +2396,7 @@ function updateVerticalArticleLists() {
         const timeout = setTimeout(() => controller.abort(), 12000);
         let text;
         try {
-            const response = await fetch(url.href, {credentials: "same-origin", signal: controller.signal});
+            const response = await fetch(url.href, {credentials: "same-origin", redirect: "error", signal: controller.signal});
             if (!response.ok) throw new Error("Sitemap HTTP " + response.status);
             text = await response.text();
         } finally { clearTimeout(timeout); }
@@ -2391,7 +2424,7 @@ function updateVerticalArticleLists() {
         }
     }
     function startTreeScan(state) {
-        if (!state || !treeSearchNormalize(treeFilterValue) || treeSitemapPromise) return;
+        if (!state || !treeActiveQuery() || treeSitemapPromise) return;
         treeSitemapStatus = "loading";
         treeSitemapPromise = (async () => {
             for (const path of ["/sitemap.xml/", "/sitemap.xml"]) {
@@ -2404,21 +2437,29 @@ function updateVerticalArticleLists() {
                 } catch (_) { /* Try the other documented URL. */ }
             }
             treeSitemapStatus = "error";
-        })().finally(() => { if (treeFilterState && treeSearchNormalize(treeFilterValue)) renderTreeFilter(); });
+        })().finally(() => { if (treeFilterState && treeActiveQuery()) renderTreeFilter(); });
     }
     
     function renderTreeFilter() {
         const state = treeFilterState;
-        if (!state || !state.tree.isConnected) return;
-        const query = treeSearchNormalize(treeFilterValue);
+        if (!state || !state.tree.isConnected || treeFilterDebouncing) return;
+        const query = treeActiveQuery();
         state.clear.hidden = !treeFilterValue;
-        state.results.hidden = !query;
-        state.nav.classList.toggle("pw-tree-filter-searching", Boolean(query));
+        const waiting = Boolean(query) && treeSitemapStatus === "loading";
+        state.results.hidden = !query || waiting;
+        state.nav.classList.toggle("pw-tree-filter-searching", Boolean(query) && !waiting);
+        if (waiting) {
+            const status = tr("Przygotowuję wyniki…", "Preparing results…");
+            const hint = tr("Pobieram mapę witryny…", "Loading sitemap…");
+            if (state.status.textContent !== status) state.status.textContent = status;
+            if (state.hint.textContent !== hint) state.hint.textContent = hint;
+            return;
+        }
         if (!query) {
             state.signature = "";
             state.lastQuery = "";
             if (state.results.childNodes.length) state.results.replaceChildren();
-            const status = tr("Filtr nazw w menu", "Filter navigation titles");
+            const status = tr("Wpisz min. 3 znaki", "Enter at least 3 characters");
             const hint = tr("Menu i mapa witryny", "Menu and sitemap");
             if (state.status.textContent !== status) state.status.textContent = status;
             if (state.hint.textContent !== hint) state.hint.textContent = hint;
@@ -2431,9 +2472,9 @@ function updateVerticalArticleLists() {
             const title = anchor?.textContent.trim();
             if (!title) continue;
             const raw = anchor.getAttribute("href");
-            const url = raw && raw !== "#" && !raw.startsWith("#") ? treeSafeURL(raw) : null;
+            const url = raw && /^(?:https?:\/\/|\/[^/]|\/\/$)/i.test(raw) ? treeSafeURL(raw) : null;
             const key = url?.href || "node:" + (content.id || title);
-            candidates.set(key, {title, key, node: anchor, nodeId: content.id, folder: content.classList.contains("folder-ct")});
+            candidates.set(key, {title, key, node: anchor, url: url?.href || null, folder: content.classList.contains("folder-ct")});
         }
         for (const entry of treeSitemapEntries) {
             if (entry.english !== isEN() || candidates.has(entry.url)) continue;
@@ -2443,30 +2484,36 @@ function updateVerticalArticleLists() {
         const score = item => { const t = treeSearchNormalize(item.title); return t === query ? 0 : t.startsWith(query) ? 1 : t.includes(query) ? 2 : 3; };
         matches.sort((a,b) => score(a)-score(b) || Number(!a.node)-Number(!b.node) || a.title.localeCompare(b.title, isEN()?"en":"pl"));
         const shown = matches.slice(0, 150);
-        const signature = JSON.stringify([query, shown.map(i => [i.key,i.title,i.folder])]);
+        const signature = JSON.stringify([query, shown.map(i => [i.key,i.title,i.folder,i.url])]);
         if (state.signature !== signature) {
             const previousScroll = state.lastQuery === query ? state.results.scrollTop : 0;
             state.lastQuery = query;
             state.signature = signature;
             const fragment = document.createDocumentFragment();
             for (const item of shown) {
-                const result = el(item.node ? "button" : "a", "pw-tree-result");
-                if (item.node) {
-                    result.type = "button";
-                    result.addEventListener("click", () => {
-                        const current = Array.from(state.tree.querySelectorAll(".TreeListcontent > a")).find(a => a === item.node || (a.parentElement.id && a.parentElement.id === item.nodeId));
-                        state.input.value = treeFilterValue = "";
-                        renderTreeFilter();
-                        if (current) {
-                            const icon = item.folder && current.parentElement.querySelector(".folder_icons_toc1");
-                            (icon || current).click();
-                        }
+                // Only genuine links can navigate, and only upon user activation.
+                // Never dispatch a click on the native tree or fetch an article.
+                const result = el(item.url ? "a" : "div", "pw-tree-result");
+                if (item.url) {
+                    result.href = item.url;
+                    result.addEventListener("click", event => {
+                        event.stopPropagation();
+                        if (!event.isTrusted) event.preventDefault();
                     });
-                } else result.href = item.url;
+                    result.addEventListener("auxclick", event => {
+                        event.stopPropagation();
+                        if (!event.isTrusted) event.preventDefault();
+                    });
+                } else {
+                    result.classList.add("pw-tree-result-label");
+                    result.title = tr("Pozycja bez adresu — otwórz ręcznie w menu", "No URL — open manually in navigation");
+                }
                 result.append(el("span", "", (item.folder ? "›  " : "") + item.title));
+                if (!item.url) result.append(el("small", "", tr("Otwórz ręcznie w menu", "Open manually in navigation")));
                 if (!item.node) result.append(el("small", "", item.slug ? tr("Nazwa z adresu URL", "Name from URL") : tr("Mapa witryny", "Sitemap")));
                 fragment.append(result);
             }
+            if (!shown.length) fragment.append(el("div", "pw-tree-result-label", tr("Brak dopasowań", "No matches")));
             state.results.replaceChildren(fragment);
             state.results.scrollTop = previousScroll;
         }
@@ -2480,10 +2527,17 @@ function updateVerticalArticleLists() {
     }
     function scheduleTreeFilter() {
         clearTimeout(treeFilterTimer);
-        treeFilterTimer = setTimeout(() => {
-            if (treeFilterState && treeSearchNormalize(treeFilterValue)) startTreeScan(treeFilterState);
+        if (!treeActiveQuery()) {
+            treeFilterDebouncing = false;
             renderTreeFilter();
-        }, 220);
+            return;
+        }
+        treeFilterDebouncing = true;
+        treeFilterTimer = setTimeout(() => {
+            treeFilterDebouncing = false;
+            if (treeFilterState && treeActiveQuery()) startTreeScan(treeFilterState);
+            renderTreeFilter();
+        }, 400);
     }
 
 	function updateTreeFilter() {
@@ -2539,28 +2593,25 @@ function updateVerticalArticleLists() {
 			nav.classList.add("pw-tree-filter-ready");
 			function reset() {
 				clearTimeout(treeFilterTimer);
+                treeFilterDebouncing = false;
 				input.value = treeFilterValue = "";
 				
 				renderTreeFilter();
 				input.focus({preventScroll: true});
 			}
-			input.addEventListener("input", () => {
-				treeFilterValue = input.value;
-				clear.hidden = !treeFilterValue;
-				scheduleTreeFilter();
-			});
-			input.addEventListener("keydown", event => {
-				if (event.key === "Escape" && treeFilterValue) { event.preventDefault(); event.stopPropagation(); reset(); }
-				if (event.key === "Enter") event.preventDefault();
-			});
-			clear.addEventListener("click", reset);
+            // Mouse events must not reach the platform's delegated tree handlers.
+            ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick"].forEach(type => {
+                panel.addEventListener(type, event => event.stopPropagation());
+                results.addEventListener(type, event => event.stopPropagation());
+            });
+            clear.addEventListener("click", reset);
 			const observer = new MutationObserver(scheduleTreeFilter);
 			observer.observe(tree, { childList: true, subtree: true, characterData: true });
 			treeFilterState = { nav, tree, panel, input, clear, status, hint, observer, results, signature: "" };
 		}
 		const s = treeFilterState;
 		if (s.input.value !== treeFilterValue) s.input.value = treeFilterValue;
-		const placeholder = tr("Filtruj menu…", "Filter navigation…");
+		const placeholder = tr("Szukaj (min. 3 znaki)…", "Search (min. 3 chars)…");
 		const label = tr("Filtruj nazwy w menu dokumentacji", "Filter documentation navigation titles");
 		
 		if (s.input.placeholder !== placeholder) s.input.placeholder = placeholder;
@@ -2569,7 +2620,7 @@ function updateVerticalArticleLists() {
 		s.clear.setAttribute("aria-label", tr("Wyczyść filtr", "Clear filter"));
 		s.clear.title = tr("Wyczyść filtr", "Clear filter");
 		
-		if (treeSearchNormalize(treeFilterValue)) startTreeScan(s);
+		// Sitemap loading is initiated only by the debounced filter event.
 		
 		renderTreeFilter();
 	}
@@ -2629,6 +2680,7 @@ function updateVerticalArticleLists() {
 		initRecent();
 		initVerticalArticleListStyles();
 		initTreeFilterStyles();
+        initTreeFilterEventIsolation();
 
 		refresh();
 
